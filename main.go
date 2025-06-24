@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
 )
 
 // Global Slack client instance
@@ -112,5 +114,52 @@ func verifySlackRequestMiddleware(c *gin.Context) {
 }
 
 func handleSlackEvents(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
+		return
+	}
 
+	// Parse the event payload
+	eventsAPIEvent, err := slackevents.ParseEvent(body, slackevents.OptionNoVerifyToken()) // Already verified by middleware
+	if err != nil {
+		log.Printf("Error parsing Slack event: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	// Handle URL verification challenge
+	if eventsAPIEvent.Type == slackevents.URLVerification {
+		var r *slackevents.ChallengeResponse
+		err := json.Unmarshal([]byte(body), &r)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unmarshal challenge response"})
+			return
+		}
+		c.Data(http.StatusOK, "text/plain", []byte(r.Challenge))
+		return
+	}
+
+	// Handle event callbacks
+	if eventsAPIEvent.Type == slackevents.CallbackEvent {
+		innerEvent := eventsAPIEvent.InnerEvent
+		switch ev := innerEvent.Data.(type) {
+		case *slackevents.AppMentionEvent:
+			log.Printf("Received app_mention event: %+v", ev)
+			// Respond to the mention
+			_, _, err := slackClient.PostMessage(
+				ev.Channel,
+				slack.MsgOptionText(fmt.Sprintf("Hello <@%s>! You mentioned me: %s", ev.User, ev.Text), false),
+				slack.MsgOptionAsUser(true), // Post as the bot user
+			)
+			if err != nil {
+				log.Printf("Error posting message to Slack: %v", err)
+			}
+		default:
+			log.Printf("Unsupported event type: %s", innerEvent.Type)
+		}
+	}
+
+	// Acknowledge receipt of the event
+	c.Status(http.StatusOK)
 }
